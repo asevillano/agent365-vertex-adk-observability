@@ -5,16 +5,16 @@ desplegado en **Vertex AI Agent Engine** (Google Cloud) envíe su actividad a **
 de forma que:
 
 - cada ejecución del agente aparece en **Microsoft Defender** (búsqueda avanzada, tabla
-  `CloudAppEvents`: `InvokeAgent`, `InferenceCall`, `ExecuteToolBySDK`), con el usuario que lo invocó,
-  las preguntas, las respuestas, el modelo y cada herramienta usada;
+  `CloudAppEvents`), con el usuario que lo invocó, las preguntas, las respuestas, el modelo y cada
+  herramienta usada;
 - el agente aparece en el **inventario de agentes del centro de administración de Microsoft 365**
   como una instancia registrada de Agent 365, con su propia identidad de **Microsoft Entra Agent ID**.
 
 No hace falta modificar el código del agente: un **plugin de ADK** observa cada ejecución y la envía a
 Agent 365 por **OTLP/HTTP (JSON)** con autenticación **servicio a servicio (S2S)**.
 
-> Probado en noviembre de 2026 con google-adk 2.4.0, google-cloud-aiplatform 1.160.0,
-> Python 3.12, Agent 365 CLI 2.0.4 y Gemini 2.5 Flash.
+Versiones probadas: google-adk 2.4.0, google-cloud-aiplatform 1.160.0, Python 3.12, Agent 365 CLI
+2.0.4 y Gemini 2.5 Flash.
 
 ## Índice
 
@@ -24,12 +24,10 @@ Agent 365 por **OTLP/HTTP (JSON)** con autenticación **servicio a servicio (S2S
 4. [Guía paso a paso](#guía-paso-a-paso)
 5. [Instrumentar tu propio agente](#instrumentar-tu-propio-agente)
 6. [Qué se envía a Agent 365](#qué-se-envía-a-agent-365)
-7. [Resultados en un agente real](#resultados-en-un-agente-real)
-8. [Problemas conocidos y soluciones](#problemas-conocidos-y-soluciones)
-9. [Alternativas evaluadas](#alternativas-evaluadas)
-10. [Seguridad y datos](#seguridad-y-datos)
-11. [Limpieza](#limpieza)
-12. [Referencias](#referencias)
+7. [Seguridad y datos](#seguridad-y-datos)
+8. [Limpieza](#limpieza)
+9. [Solución de problemas](#solución-de-problemas)
+10. [Documentación oficial de Microsoft](#documentación-oficial-de-microsoft)
 
 ## Arquitectura
 
@@ -54,9 +52,12 @@ Agent 365 por **OTLP/HTTP (JSON)** con autenticación **servicio a servicio (S2S
       └──► Microsoft Purview
 ```
 
-**Identidad.** Agent 365 exige que coincidan tres valores: el cliente del token (`azp`), el
-`{agentId}` de la URL y el atributo `gen_ai.agent.id` de los spans. Los tres son el `appId` de la
-**identidad de agente**. Esa identidad no tiene credenciales propias; las tiene su **blueprint**:
+### Identidad y token
+
+Agent 365 exige que coincidan tres valores: el cliente del token (`azp`), el `{agentId}` de la URL y
+el atributo `gen_ai.agent.id` de los spans. Los tres son el `appId` de la **identidad de agente**.
+Esa identidad no tiene credenciales propias; las tiene su **blueprint**, y el token se obtiene en dos
+pasos:
 
 1. Con el secreto del blueprint se pide un token para `api://AzureADTokenExchange/.default`,
    indicando `fmi_path = <appId de la identidad de agente>`.
@@ -64,7 +65,16 @@ Agent 365 por **OTLP/HTTP (JSON)** con autenticación **servicio a servicio (S2S
    (`9b975845-388f-4429-889e-eab1ef63949c/.default`).
 
 El token resultante no lleva `roles` ni `scp`: Agent 365 lo acepta porque la identidad es una
-**instancia registrada**, no por un permiso.
+**instancia registrada**. No hacen falta permisos de API ni consentimiento para la telemetría.
+
+### Por qué este enfoque
+
+| Opción | Resultado |
+|---|---|
+| **Plugin de ADK + identidad registrada de Entra Agent ID** (este repositorio) | Actividad en Defender y agente en el inventario, sin tocar el código del agente ni conceder permisos delegados |
+| Plugin de ADK + aplicación estándar de Entra con el rol `Agent365.Observability.OtelWrite` | Actividad en Defender, pero el agente no aparece en el inventario: una aplicación estándar no es una instancia registrada. El plugin lo admite si no se define `A365_BLUEPRINT_ID` |
+| Plataforma conectada Google Vertex AI (centro de administración) | Requiere una clave JSON de cuenta de servicio, importa todos los agentes del proyecto y la región, y obtiene la telemetría de Cloud Trace y de una exportación a BigQuery |
+| Microsoft OpenTelemetry Distro | No instrumenta ADK automáticamente; habría que añadir los *scopes* a mano en el código del agente |
 
 ## Contenido del repositorio
 
@@ -78,11 +88,11 @@ El token resultante no lleva `roles` ni `scp`: Agent 365 lo acepta porque la ide
 | `a365.config.example.json` | Plantilla de `a365.config.json` para la CLI de Agent 365 |
 | `new-agent-identity.ps1` | Crea la identidad de agente con la credencial del blueprint (paso 4) |
 | `store-blueprint-secret.ps1` | Guarda el secreto del blueprint en Secret Manager sin mostrarlo (paso 8) |
-| `send-test-span.ps1` | Prueba sin agente: token, y una ejecución sintética enviada a Agent 365 (paso 10) |
+| `send-test-span.ps1` | Prueba sin agente: obtiene el token y envía una ejecución sintética (paso 10) |
 | `run_local.py` | Ejecuta el agente instrumentado en local; sin `--send` guarda las peticiones OTLP en `out/` |
 | `deploy.py` | Crea o actualiza el agente en Agent Engine; sin `--apply` solo muestra el plan |
 | `query.py` | Pregunta al agente desplegado |
-| `gcp_auth.py` | Credenciales de GCP para los scripts (ADC o, si fallan, el token de `gcloud`) |
+| `gcp_auth.py` | Credenciales de GCP para los scripts: ADC o, si no están disponibles, el token de `gcloud` |
 
 `config.json`, `a365.config.json`, `a365.generated.config.json`, `deployment.json` y `out/` son
 locales y están en `.gitignore`: contienen identificadores de tu tenant y de tu proyecto, y `out/`
@@ -94,14 +104,12 @@ contiene preguntas y respuestas.
 
 - Un tenant con **Microsoft Agent 365** habilitado (programa Frontier y una licencia que lo incluya,
   por ejemplo Microsoft 365 E7).
-- Una cuenta con rol **Administrador global** para el registro (basta *Agent ID Developer* para crear
-  el blueprint, pero el registro y los consentimientos piden más).
+- Una cuenta con rol **Administrador global** para crear el blueprint y registrar el agente.
 - Acceso a **Microsoft Defender** (búsqueda avanzada) para comprobar la actividad.
 
 **Herramientas locales** (los comandos de esta guía son de PowerShell 7 en Windows)
 
-- [.NET SDK 10](https://dotnet.microsoft.com/download) y la CLI de Agent 365:
-  `dotnet tool install -g Microsoft.Agents.A365.DevTools.Cli`
+- [.NET SDK 10](https://dotnet.microsoft.com/download) y la CLI de Agent 365
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
 - Módulos de PowerShell `Microsoft.Graph.Authentication` y `Microsoft.Graph.Applications` (misma versión)
 - [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`)
@@ -110,16 +118,17 @@ contiene preguntas y respuestas.
 **Google Cloud**
 
 - Un proyecto con facturación y permisos para habilitar API, crear cuentas de servicio, secretos y
-  agentes de Agent Engine.
+  agentes de [Vertex AI Agent Engine](https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/overview).
 
 ## Guía paso a paso
 
-En los comandos, sustituye lo que va entre `< >`.
+En los comandos, sustituye lo que va entre `< >`. Elige antes el nombre del agente; en los ejemplos
+es `a365-renewal-risk-sample`.
 
 ### Paso 0. Preparar el repositorio
 
 ```powershell
-git clone https://github.com/<tu-usuario>/agent365-vertex-adk-observability.git
+git clone https://github.com/<usuario>/agent365-vertex-adk-observability.git
 cd agent365-vertex-adk-observability
 
 python -m venv .venv
@@ -130,26 +139,19 @@ Copy-Item config.example.json config.json
 Copy-Item a365.config.example.json a365.config.json
 ```
 
-Elige ya el nombre del agente. En los ejemplos es `a365-renewal-risk-sample`; se usa como
-`displayName` en `config.json` y como base de los nombres del blueprint y de la identidad en
-`a365.config.json`.
-
-### Paso 1. Herramientas de Microsoft e inicio de sesión
+### Paso 1. Instalar las herramientas de Microsoft e iniciar sesión
 
 ```powershell
 dotnet tool install -g Microsoft.Agents.A365.DevTools.Cli
 a365 --version
 
 Install-PSResource Microsoft.Graph.Authentication, Microsoft.Graph.Applications -Scope CurrentUser
-Get-Module -ListAvailable Microsoft.Graph.Authentication, Microsoft.Graph.Applications   # misma versión
+Get-Module -ListAvailable Microsoft.Graph.Authentication, Microsoft.Graph.Applications
 
 az login --tenant <tenant-id>      # con el administrador global
 ```
 
-> Si `Save-Module`/`Install-Module` dicen `Unable to find repository 'PSGallery'`, usa
-> `Install-PSResource` (PSResourceGet). Si la red bloquea `cdn.powershellgallery.com` (error TLS),
-> instala desde un repositorio interno de tu organización o copia la carpeta de los módulos desde
-> otro equipo a `Documents\PowerShell\Modules`.
+Los dos módulos de Microsoft Graph deben tener la misma versión.
 
 ### Paso 2. Configurar la CLI de Agent 365
 
@@ -169,10 +171,8 @@ Comprueba los requisitos (no crea nada):
 a365 setup requirements
 ```
 
-La línea `Client App Configuration (<id>)` muestra la aplicación cliente; pon ese id en
-`clientAppId`. Si no hay ninguna (ni la gestionada por Microsoft ni una del tenant llamada
-*Agent 365 CLI*), el comando la pide y un administrador global puede crearla respondiendo `C`.
-El aviso `Frontier Preview Program - Tenant enrollment cannot be verified automatically` es normal.
+La línea `Client App Configuration (<id>)` muestra la aplicación cliente; pon ese id en `clientAppId`.
+Si no existe ninguna, el comando la pide y un administrador global puede crearla respondiendo `C`.
 
 ### Paso 3. Crear el blueprint
 
@@ -183,26 +183,24 @@ a365 setup all --authmode s2s --dry-run
 a365 setup all --authmode s2s
 ```
 
-`--authmode s2s` indica que el agente se autentica como servicio (sin usuario). El comando:
+`--authmode s2s` indica que el agente se autentica como servicio, sin usuario. El comando:
 
 1. crea el **blueprint** (aplicación de Entra), su entidad de servicio y un **secreto de cliente**,
-   que guarda cifrado para tu usuario de Windows en esta carpeta (`a365.generated.config.json` y
-   `a365 setup blueprint --show-secret`);
+   que guarda cifrado para tu usuario de Windows en esta carpeta;
 2. configura los **permisos heredables** del blueprint;
 3. abre el navegador para el **consentimiento de administrador de permisos delegados** (Microsoft
-   Graph: Mail.ReadWrite, Mail.Send, Chat.ReadWrite, Files.ReadWrite.All…; Agent 365 Tools; Power
-   Platform API);
+   Graph, Agent 365 Tools y Power Platform API);
 4. crea la **identidad de agente** y la **registra** en Agent 365.
 
-Esos permisos delegados sirven para que el agente actúe en nombre de usuarios (herramientas de Work IQ,
-correo, Teams). **La telemetría S2S no los necesita.** Tienes dos opciones:
+Los permisos delegados del punto 3 sirven para que el agente actúe en nombre de usuarios (correo,
+Teams, herramientas de Work IQ). **La telemetría no los necesita.** Elige una opción:
 
-- **Mínimo privilegio (recomendada).** No aceptes el consentimiento: espera a que caduque (180 s) y
-  responde `N` a `Add these permissions to the blueprint programmatically?`. La CLI termina con
-  `Setup cancelled`, pero el blueprint y su secreto ya existen. Sigue con el paso 4.
-- **Aceptar el consentimiento.** La CLI continúa y crea y registra la identidad. Salta al paso 6.
+- **Mínimo privilegio (recomendada).** No aceptes el consentimiento: deja que expire (180 s) y
+  responde `N` a `Add these permissions to the blueprint programmatically?`. La CLI se detiene con el
+  blueprint y su secreto ya creados. Continúa en el paso 4.
+- **Aceptar el consentimiento.** La CLI crea y registra la identidad. Continúa en el paso 6.
 
-### Paso 4. Crear la identidad de agente (si paraste en el consentimiento)
+### Paso 4. Crear la identidad de agente
 
 ```powershell
 .\new-agent-identity.ps1                          # patrocinador: el usuario de az
@@ -210,12 +208,10 @@ correo, Teams). **La telemetría S2S no los necesita.** Tienes dos opciones:
 ```
 
 El script lee el blueprint de `a365.generated.config.json`, obtiene un token de aplicación del propio
-blueprint (que incluye `AgentIdentity.CreateAsManager`) y llama a
-`POST https://graph.microsoft.com/v1.0/servicePrincipals/microsoft.graph.agentIdentity` con el nombre
-de `agentIdentityDisplayName` y un **patrocinador** (obligatorio). Muestra el `appId` de la identidad.
-
-> `a365 setup all --agent-registration-only --dry-run` dice que crearía la identidad, pero en la
-> versión 2.0.4 no lo hace: sin identidad previa falla con `Agent identity ID is not set in config`.
+blueprint (que incluye `AgentIdentity.CreateAsManager`) y crea la identidad con
+`POST https://graph.microsoft.com/v1.0/servicePrincipals/microsoft.graph.agentIdentity`, con el nombre
+de `agentIdentityDisplayName` y un **patrocinador**. Muestra el `appId` de la identidad. Si ya existe,
+no hace nada.
 
 ### Paso 5. Registrar la identidad en Agent 365
 
@@ -223,7 +219,7 @@ de `agentIdentityDisplayName` y un **patrocinador** (obligatorio). Muestra el `a
 a365 setup all --authmode s2s --agent-registration-only
 ```
 
-Busca la identidad por nombre y la registra. Resultado esperado:
+Busca la identidad por su nombre y la registra:
 
 ```text
 Found agent identity (ID: <identity-appId>). Using it for registration.
@@ -238,10 +234,10 @@ Completa en `config.json`:
 | Campo | Valor |
 |---|---|
 | `tenantId` | Id. del tenant |
-| `agentAppId` | `appId` de la **identidad de agente** (pasos 4 o 3) |
+| `agentAppId` | `appId` de la **identidad de agente** |
 | `agentBlueprintId` | `agentBlueprintId` de `a365.generated.config.json` |
 | `agentName`, `agentDescription` | Nombre y descripción que verás en Defender y en el inventario |
-| `testUserId` | `objectId` de Entra del usuario que hará las pruebas (`az ad user show --id <upn> --query id -o tsv`) |
+| `testUserId` | `objectId` de Entra del usuario de pruebas (`az ad user show --id <upn> --query id -o tsv`) |
 
 ### Paso 7. Preparar Google Cloud
 
@@ -258,17 +254,17 @@ foreach ($role in 'roles/aiplatform.user', 'roles/logging.logWriter') {
     gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$SA_EMAIL" --role $role --condition=None | Out-Null
 }
 
-# Tu usuario necesita poder desplegar con esa cuenta de servicio (iam.serviceAccounts.actAs)
+# Permiso para desplegar con esa cuenta de servicio (iam.serviceAccounts.actAs)
 gcloud iam service-accounts add-iam-policy-binding $SA_EMAIL --project $PROJECT `
     --member "user:<tu-cuenta-de-gcp>" --role roles/iam.serviceAccountUser
 ```
 
-- `roles/aiplatform.user` permite al agente llamar a Gemini; `roles/logging.logWriter`, escribir en
-  Cloud Logging (donde el plugin deja el resultado de cada envío).
-- El acceso al secreto lo concede `deploy.py` **solo sobre ese secreto** (paso 12).
-- Opcional: `roles/cloudtrace.agent` y `roles/monitoring.metricWriter` si quieres la telemetría propia
-  de Agent Engine; sin ellos verás avisos `Failed to export span/metrics batch code: 403`, que no
-  afectan a Agent 365.
+| Rol | Para qué |
+|---|---|
+| `roles/aiplatform.user` | Llamar a Gemini en Vertex AI |
+| `roles/logging.logWriter` | Escribir en Cloud Logging, donde el plugin deja el resultado de cada envío |
+| `roles/secretmanager.secretAccessor` (solo sobre el secreto) | Leer el secreto del blueprint; lo concede `deploy.py` en el paso 12 |
+| `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` (opcionales) | Telemetría propia de Agent Engine en Cloud Trace y Cloud Monitoring |
 
 Completa en `config.json`: `gcpProject`, `gcpRegion`, `serviceAccount` (`$SA_EMAIL`), `displayName`
 (nombre del agente en Agent Engine) y `secretName` (p. ej. `a365-blueprint-secret`).
@@ -279,21 +275,20 @@ Completa en `config.json`: `gcpProject`, `gcpRegion`, `serviceAccount` (`$SA_EMA
 .\store-blueprint-secret.ps1
 ```
 
-Lee el secreto con `a365 setup blueprint --show-secret` (por eso debe ejecutarse en esta carpeta y con
-el mismo usuario de Windows que ejecutó el paso 3), crea el secreto en Secret Manager si no existe y
-añade una versión. El valor no se muestra ni queda en disco.
+Lee el secreto con `a365 setup blueprint --show-secret` (por eso se ejecuta en esta carpeta y con el
+mismo usuario de Windows que el paso 3), crea el secreto en Secret Manager si no existe y añade una
+versión. El valor no se muestra ni queda en disco.
 
 ### Paso 9. Iniciar sesión en Google Cloud
 
 ```powershell
 gcloud auth login
-gcloud auth application-default login     # opcional, ver nota
+gcloud auth application-default login
 gcloud config set project <gcp-project-id>
 ```
 
-> Los scripts usan las *Application Default Credentials* (ADC). Si no existen o piden
-> reautenticación (`RefreshError: Reauthentication is needed`), `gcp_auth.py` usa el token de la
-> cuenta activa de `gcloud` (válido una hora) y lo indica con `ADC unavailable ...`.
+Los scripts usan las *Application Default Credentials* (ADC); si no están disponibles, usan el token
+de la cuenta activa de `gcloud` y lo indican con `ADC unavailable ...`.
 
 ### Paso 10. Probar el envío sin agente
 
@@ -301,8 +296,8 @@ gcloud config set project <gcp-project-id>
 .\send-test-span.ps1
 ```
 
-Obtiene el token en dos pasos, muestra sus *claims* (nunca el token) y envía una ejecución
-sintética (`invoke_agent` + `chat` + `execute_tool`). Resultado esperado:
+Obtiene el token en dos pasos, muestra sus *claims* (nunca el token) y envía una ejecución sintética
+(`invoke_agent` + `chat` + `execute_tool`):
 
 ```text
 Token: aud=9b975845-388f-4429-889e-eab1ef63949c azp=<identity-appId> tid=<tenant-id> roles= scp=
@@ -313,10 +308,13 @@ partialSuccess: rejectedSpans=0
   ...
 ```
 
-- `azp` debe ser la identidad de agente; `roles` y `scp` vacíos es lo correcto.
-- El 403 de *Eligibility* es normal con este token (la consulta de elegibilidad pide el rol
-  `Agent365.Observability.OtelWrite`, que una instancia registrada no necesita).
-- Un HTTP 200 no basta: cada span debe aparecer como `sent` en `results`.
+Comprueba que:
+
+- `azp` es la identidad de agente y `roles` y `scp` están vacíos;
+- la respuesta es HTTP 200 con `rejectedSpans=0`;
+- cada span aparece como `sent`.
+
+La línea `Eligibility` da 403 con este tipo de token; no afecta al envío.
 
 ### Paso 11. Probar el agente en local
 
@@ -325,7 +323,7 @@ python run_local.py                                       # no envía: guarda el
 python run_local.py "Assess renewal risk for Fabrikam" --send
 ```
 
-Usa el mismo punto de entrada que Agent Engine y llama a Gemini en tu proyecto. Sin `--send` verás:
+Usa el mismo punto de entrada que Agent Engine y llama a Gemini en tu proyecto:
 
 ```text
   -> tool get_account
@@ -336,7 +334,7 @@ Renewal Risk: **High** ...
 [dry run] 8 spans -> otlp-<fecha>-1.json: chat, chat, chat, execute_tool:get_account, ..., invoke_agent
 ```
 
-Revisa el JSON de `out/` para ver exactamente qué se enviaría.
+El JSON de `out/` es exactamente lo que se enviaría.
 
 ### Paso 12. Desplegar en Agent Engine
 
@@ -381,8 +379,8 @@ INFO a365_observability: Agent 365 export HTTP 200 rejectedSpans=0 invoke_agent=
 
 ### Paso 14. Verificar en Defender
 
-Espera entre 5 y 30 minutos. En **security.microsoft.com → Investigación y respuesta → Búsqueda →
-Búsqueda avanzada**:
+La actividad tarda entre 5 y 30 minutos en aparecer. En **security.microsoft.com → Investigación y
+respuesta → Búsqueda → Búsqueda avanzada**:
 
 ```kusto
 let agentIdToFind = "<identity-appId>";
@@ -395,7 +393,7 @@ CloudAppEvents
 | order by Timestamp desc
 ```
 
-Resumen por tipo:
+Resumen por tipo de evento:
 
 ```kusto
 let agentIdToFind = "<identity-appId>";
@@ -418,11 +416,13 @@ CloudAppEvents
 | order by Timestamp asc
 ```
 
+Cada ejecución produce un `InvokeAgent`, un `InferenceCall` por llamada al modelo y un
+`ExecuteToolBySDK` por herramienta. El usuario (`AccountObjectId`) figura en el evento `InvokeAgent`.
+
 ### Paso 15. Verificar el inventario
 
 En **admin.microsoft.com → Agentes → Todos los agentes → Registro**, busca el agente por nombre o por
-**Id. de agente** (`<identity-appId>`). En nuestras pruebas apareció menos de una hora después del
-registro.
+**Id. de agente** (`<identity-appId>`). Puede tardar más en aparecer que la actividad en Defender.
 
 ## Instrumentar tu propio agente
 
@@ -437,10 +437,10 @@ registro.
    app = AdkApp(agent=root_agent, plugins=[A365ObservabilityPlugin.from_env()])
    ```
 
-   Con `deploy.py`: cambia el `import` de `agent/a365_entrypoint.py`, pon tu paquete en
-   `agent/<paquete>/`, ajusta `AGENT_PACKAGE` en `deploy.py` y añade tus dependencias a
+   Con `deploy.py`: pon tu paquete en `agent/<paquete>/`, cambia el `import` de
+   `agent/a365_entrypoint.py` y `AGENT_PACKAGE` en `deploy.py`, y añade tus dependencias a
    `agent/requirements.txt`. Las variables que necesite tu agente van en `agentEnv` de `config.json`.
-3. Variables de entorno del plugin:
+3. Variables de entorno del plugin (`deploy.py` y `run_local.py` las rellenan desde `config.json`):
 
    | Variable | Obligatoria | Valor |
    |---|---|---|
@@ -457,28 +457,26 @@ registro.
 4. Llama al agente con `user_id` = **objectId de Entra** del usuario. Opcionalmente, guarda en el
    estado de la sesión `a365_user_email`, `a365_user_name` y `a365_client_ip`.
 
-**Cómo funciona el plugin**
+### Cómo funciona el plugin
 
 | Callback de ADK | Qué hace |
 |---|---|
-| `before_run_callback` | Abre el span raíz `invoke_agent` y los atributos comunes |
+| `before_run_callback` | Abre el span raíz `invoke_agent` con los atributos comunes |
 | `on_event_callback` | Recoge el texto final de la respuesta |
 | `before_model_callback` / `after_model_callback` | Abre y cierra un span `chat` por llamada al modelo (tokens, motivo de fin) |
-| `before_tool_callback` / `after_tool_callback` | Abre y cierra un span `execute_tool` (argumentos, resultado; tipo `function` o `MCP Server` con su host) |
+| `before_tool_callback` / `after_tool_callback` | Abre y cierra un span `execute_tool` (argumentos y resultado; tipo `function` o `MCP Server` con su host) |
 | `on_model_error_callback` / `on_tool_error_callback` | Marca el error y cierra la ejecución |
-| `after_run_callback` | Envía la ejecución completa (en lotes de < 900 KB) |
+| `after_run_callback` | Envía la ejecución completa, en lotes de menos de 900 KB |
 
 - Es de **mejor esfuerzo**: cualquier fallo de telemetría se registra y nunca llega al agente.
 - No usa el SDK de OpenTelemetry (construye el OTLP/JSON directamente), así que no hay conflictos de
   versiones con ADK.
-- Recorta mensajes a 32 000 caracteres y argumentos y resultados de herramientas a 16 000, manteniendo
-  JSON válido.
-- Sin `A365_BLUEPRINT_ID` usa *client credentials* de una aplicación estándar de Entra
-  (ver [Alternativas](#alternativas-evaluadas)).
+- Recorta los mensajes a 32 000 caracteres y los argumentos y resultados de herramientas a 16 000,
+  manteniendo JSON válido.
 
 ## Qué se envía a Agent 365
 
-| Span | En Defender | Atributos principales |
+| Span | Evento en Defender | Atributos principales |
 |---|---|---|
 | `invoke_agent <nombre>` (raíz) | `InvokeAgent` | `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.request.model`, `gen_ai.execution.type=HumanToAgent` |
 | `chat <modelo>` | `InferenceCall` | `gen_ai.request.model`, `gen_ai.provider.name=gcp.vertex_ai`, mensajes, `gen_ai.usage.input_tokens`/`output_tokens` |
@@ -488,59 +486,13 @@ Comunes a todos: `gen_ai.agent.id`, `gen_ai.agent.name`, `microsoft.a365.agent.b
 `microsoft.tenant.id`, `user.id`, `gen_ai.conversation.id` y `microsoft.session.id` (id de sesión de
 Agent Engine), `microsoft.channel.name`, `server.address`, `service.name`.
 
-## Resultados en un agente real
-
-El método se validó primero con un agente real de análisis de riesgo de renovación (ADK en Agent
-Engine), con herramientas MCP de CRM y de tickets y búsquedas en Vertex AI Search, sin cambiar su
-código:
-
-- Una ejecución típica genera unos 15 spans: 1 `invoke_agent`, 5–7 `chat` y 6–12 `execute_tool`, y
-  llegan como el mismo número de eventos en Defender.
-- Tras registrar la identidad con Entra Agent ID, el agente apareció en el inventario del centro de
-  administración; con la aplicación estándar de Entra solo aparecía su actividad en Defender.
-- Diez consultas seguidas: todas con `HTTP 200`, `rejectedSpans=0` y todos los spans `sent`.
-
-Observaciones:
-
-- Solo `InvokeAgent` lleva el usuario resuelto (`AccountObjectId`, UPN); los eventos hijos lo dejan
-  vacío aunque el span envíe `user.id`.
-- Las herramientas MCP también llegan como `ExecuteToolBySDK`, aunque el span lleve
-  `gen_ai.tool.type = MCP Server`.
-- La ingesta en Defender tarda **entre 5 y 30 minutos**; el inventario puede tardar más.
-- Los ids de sesión numéricos de Agent Engine sirven como `gen_ai.conversation.id`.
-
-## Problemas conocidos y soluciones
-
-| Síntoma | Causa | Solución |
-|---|---|---|
-| `Save-Module`: `Unable to find repository 'PSGallery'`; descarga con error TLS | PowerShellGet sin PSGallery registrado o red que bloquea su CDN | `Install-PSResource`; repositorio interno o copia de los módulos (paso 1) |
-| `a365 setup all` termina en `Setup cancelled` tras el consentimiento | No se aceptaron los permisos delegados | Pasos 4 y 5 (no hacen falta para la telemetría) |
-| `--agent-registration-only`: `Agent identity ID is not set in config` | La identidad aún no existe | `new-agent-identity.ps1` y repetir |
-| Token, paso 1: HTTP 400 | `client_id` no es el blueprint o falta/está mal `fmi_path` | `client_id` = blueprint, `fmi_path` = identidad de agente |
-| `AADSTS7000215` (secreto no válido) | Secreto distinto del del blueprint | `store-blueprint-secret.ps1` de nuevo |
-| POST traces: 403 `insufficient_scope` | Identidad no registrada (o aplicación estándar sin el rol `OtelWrite`) | `a365 setup all --authmode s2s --agent-registration-only` |
-| `Eligibility: HTTP 403` | Normal con una instancia registrada sin rol | Ninguna |
-| HTTP 200 pero nada en Defender | Ingesta en curso, o spans no `sent` | Esperar hasta 30 min; revisar `results` y `partialSuccess` |
-| Actividad en Defender pero no en el inventario | Aplicación estándar de Entra, no instancia registrada | Pasos 3–5 |
-| `RefreshError: Reauthentication is needed` | ADC caducadas | `gcloud auth application-default login`, o dejar que `gcp_auth.py` use el token de `gcloud` |
-| `deploy.py`: permiso `iam.serviceAccounts.actAs` | Falta `roles/iam.serviceAccountUser` sobre la cuenta de servicio | Paso 7 |
-| `deploy.py`: `already exists and was not deployed from here` | Hay otro agente con ese `displayName` | Cambia `displayName` |
-| Logs: `Failed to export span/metrics batch code: 403` | Telemetría propia de Agent Engine sin roles de Cloud Trace/Monitoring | Ignorar u otorgar los roles opcionales (paso 7) |
-
-## Alternativas evaluadas
-
-| Opción | Resultado |
-|---|---|
-| **Plugin de ADK + identidad registrada de Entra Agent ID** (este repositorio) | Actividad en Defender y agente en el inventario, sin cambiar el código del agente y sin permisos delegados |
-| Plugin de ADK + **aplicación estándar de Entra** con el rol de aplicación `Agent365.Observability.OtelWrite` y consentimiento | Funciona para la actividad en Defender, pero el agente **no aparece** en el inventario: una aplicación estándar no es una instancia registrada. El plugin lo admite si no se define `A365_BLUEPRINT_ID` |
-| **Plataforma conectada Google Vertex AI** (centro de administración → Agentes → Plataformas conectadas) | Pide una **clave JSON** de cuenta de servicio (a menudo bloqueada por la política `iam.disableServiceAccountKeyCreation`), importa **todos** los agentes del proyecto y la región, requiere permisos de borrado y obtiene la telemetría por otra vía (Cloud Trace + exportación a BigQuery) |
-| Microsoft OpenTelemetry Distro | No instrumenta ADK automáticamente; habría que añadir los *scopes* a mano en el agente |
+Las herramientas de servidores MCP también se registran como `ExecuteToolBySDK`.
 
 ## Seguridad y datos
 
 - El único secreto es el del blueprint: vive en **Secret Manager** y solo la cuenta de servicio del
-  agente puede leerlo. Los scripts nunca lo muestran. Renuévalo antes de que caduque (`a365 setup
-  blueprint`, y después `store-blueprint-secret.ps1`).
+  agente puede leerlo. Los scripts nunca lo muestran. Renuévalo antes de que caduque y vuelve a
+  ejecutar `store-blueprint-secret.ps1`.
 - No se conceden permisos delegados ni el rol `OtelWrite`: la instancia registrada basta para enviar
   telemetría.
 - Los spans incluyen **preguntas, respuestas y resultados de herramientas**, que quedan en Defender y
@@ -565,15 +517,81 @@ gcloud iam service-accounts delete <serviceAccount> --project <gcp-project-id>
 a365 cleanup
 ```
 
-## Referencias
+## Solución de problemas
 
-- [Agent 365: integración directa con OpenTelemetry](https://learn.microsoft.com/microsoft-agent-365/developer/direct-open-telemetry-integration)
-- [Agent 365: modelo de datos y conceptos de observabilidad](https://learn.microsoft.com/microsoft-agent-365/developer/observability-concepts)
-- [Agent 365: referencia de atributos](https://learn.microsoft.com/microsoft-agent-365/developer/observability-attribute-reference)
-- [Agent 365: solución de problemas de OTel directo](https://learn.microsoft.com/microsoft-agent-365/developer/direct-open-telemetry-troubleshooting)
-- [Agent 365: identidad de agentes](https://learn.microsoft.com/microsoft-agent-365/developer/identity) y [registro](https://learn.microsoft.com/microsoft-agent-365/developer/registration)
-- [CLI de Agent 365: `setup`](https://learn.microsoft.com/microsoft-agent-365/developer/reference/cli/setup)
-- [Microsoft Graph: crear `agentIdentity`](https://learn.microsoft.com/graph/api/agentidentity-post)
-- [Agent 365: conectar Google Vertex AI](https://learn.microsoft.com/microsoft-agent-365/admin/connected-platforms-google-vertex-ai)
-- [Google ADK: plugins](https://google.github.io/adk-docs/plugins/)
-- [Vertex AI Agent Engine](https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/overview)
+**Instalación y registro**
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `Save-Module`/`Install-Module`: `Unable to find repository 'PSGallery'` | PowerShellGet sin el repositorio PSGallery registrado | Usa `Install-PSResource` (PSResourceGet), como en el paso 1 |
+| Descarga de módulos con error TLS (`cdn.powershellgallery.com`) | La red bloquea la CDN de PowerShell Gallery | Instala desde un repositorio interno de tu organización o copia las carpetas de los módulos desde otro equipo a `Documents\PowerShell\Modules` |
+| `a365 setup requirements`: aviso `Frontier Preview Program - Tenant enrollment cannot be verified automatically` | La CLI no puede comprobar la inscripción del tenant | Ninguna, si el tenant tiene Agent 365 habilitado |
+| `a365 setup all` termina con `Setup cancelled` tras el consentimiento | No se aceptaron los permisos delegados | Es lo esperado con la opción de mínimo privilegio: pasos 4 y 5 |
+| `--agent-registration-only`: `Agent identity ID is not set in config` | La identidad de agente no existe todavía. Su `--dry-run` indica que la crearía, pero solo la busca | Ejecuta `new-agent-identity.ps1` y repite |
+| `store-blueprint-secret.ps1` o `new-agent-identity.ps1`: `Could not read the blueprint secret` | Se ejecutan en otra carpeta o con otro usuario de Windows que el paso 3 | Ejecútalos en la carpeta y con el usuario del paso 3, o crea un secreto nuevo para el blueprint |
+
+**Token y envío a Agent 365**
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| Token, primer paso: HTTP 400 | `client_id` no es el blueprint, o falta o es incorrecto `fmi_path` | `client_id` = blueprint, `fmi_path` = `appId` de la identidad de agente |
+| `AADSTS7000215` (secreto no válido) | El secreto de Secret Manager no es el del blueprint o ha caducado | Vuelve a ejecutar `store-blueprint-secret.ps1` |
+| `Eligibility: HTTP 403` en `send-test-span.ps1` | La consulta de elegibilidad pide el rol `OtelWrite`, que una instancia registrada no tiene | Ninguna: no afecta al envío |
+| POST traces: 403 `insufficient_scope` | La identidad no está registrada (o es una aplicación estándar sin el rol `OtelWrite`) | `a365 setup all --authmode s2s --agent-registration-only` |
+| HTTP 200 pero `rejectedSpans` > 0 | Atributos obligatorios ausentes o no válidos | Revisa `partialSuccess.errorMessage` y el OTLP de `out/` (paso 11) |
+| HTTP 200 y spans `sent`, pero nada en Defender | La ingesta tarda | Espera hasta 30 minutos |
+| Actividad en Defender pero el agente no está en el inventario | Se usa una aplicación estándar de Entra en vez de una identidad registrada | Pasos 3 a 6 |
+| El usuario no aparece en `InferenceCall` ni en `ExecuteToolBySDK` | Defender solo resuelve el usuario en `InvokeAgent` | Ninguna; filtra por `InvokeAgent` para ver quién ejecutó el agente |
+
+**Google Cloud**
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `RefreshError: Reauthentication is needed` | Las ADC han caducado | `gcloud auth application-default login`; mientras tanto, los scripts usan el token de `gcloud` (válido una hora) |
+| `deploy.py`: falta el permiso `iam.serviceAccounts.actAs` | Tu usuario no tiene `roles/iam.serviceAccountUser` sobre la cuenta de servicio | Paso 7 |
+| `deploy.py`: `already exists and was not deployed from here` | Ya hay otro agente con ese `displayName` | Cambia `displayName` en `config.json` |
+| `deploy.py`: `Secret ... does not exist` | No se ha guardado el secreto | Paso 8 |
+| Logs del agente: `Failed to export span/metrics batch code: 403` | Telemetría propia de Agent Engine sin roles de Cloud Trace o Cloud Monitoring | Ignóralo u otorga los roles opcionales del paso 7; no afecta a Agent 365 |
+| Logs del agente: `Agent 365 export HTTP 4xx` | Error en el token o en el envío | Reproduce con `send-test-span.ps1` y consulta las tablas anteriores |
+
+## Documentación oficial de Microsoft
+
+**Microsoft Agent 365**
+
+- [Microsoft Agent 365 overview](https://learn.microsoft.com/microsoft-agent-365/overview)
+- [Quickstart: Connect an existing agent to Agent 365](https://learn.microsoft.com/microsoft-agent-365/developer/get-started)
+- [Understand the total agent count](https://learn.microsoft.com/microsoft-agent-365/admin/total-agent-count) (qué agentes aparecen en el inventario)
+- [Connect Google Vertex AI to Microsoft Agent 365](https://learn.microsoft.com/microsoft-agent-365/admin/connected-platforms-google-vertex-ai) (plataforma conectada)
+
+**Observabilidad**
+
+- [Integrate agent observability using direct OTel](https://learn.microsoft.com/microsoft-agent-365/developer/direct-open-telemetry-integration)
+- [Agent 365 observability data model and concepts](https://learn.microsoft.com/microsoft-agent-365/developer/observability-concepts)
+- [Agent 365 observability attribute reference](https://learn.microsoft.com/microsoft-agent-365/developer/observability-attribute-reference)
+- [Troubleshoot direct OTel observability](https://learn.microsoft.com/microsoft-agent-365/developer/direct-open-telemetry-troubleshooting)
+
+**Identidad y registro**
+
+- [Agent 365 identity](https://learn.microsoft.com/microsoft-agent-365/developer/identity)
+- [Set up the agent blueprint (registration)](https://learn.microsoft.com/microsoft-agent-365/developer/registration)
+- [What are agent identities? (Microsoft Entra Agent ID)](https://learn.microsoft.com/entra/agent-id/what-are-agent-identities)
+- [Agent identity blueprints](https://learn.microsoft.com/entra/agent-id/agent-blueprint)
+- [Configure inheritable permissions for agent identity blueprints](https://learn.microsoft.com/entra/agent-id/configure-inheritable-permissions-blueprints)
+- [Microsoft Graph: Create agentIdentity](https://learn.microsoft.com/graph/api/agentidentity-post)
+
+**CLI de Agent 365**
+
+- [Install and use the Agent 365 CLI](https://learn.microsoft.com/microsoft-agent-365/developer/agent-365-cli)
+- [`a365 setup` command reference](https://learn.microsoft.com/microsoft-agent-365/developer/reference/cli/setup)
+- [`a365 cleanup` command reference](https://learn.microsoft.com/microsoft-agent-365/developer/reference/cli/cleanup)
+
+**Microsoft Defender**
+
+- [Advanced hunting overview](https://learn.microsoft.com/defender-xdr/advanced-hunting-overview)
+- [CloudAppEvents table](https://learn.microsoft.com/defender-xdr/advanced-hunting-cloudappevents-table)
+
+**Herramientas**
+
+- [Install the Microsoft Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph/installation)
+- [Install-PSResource](https://learn.microsoft.com/powershell/module/microsoft.powershell.psresourceget/install-psresource)
+- [Install the Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
