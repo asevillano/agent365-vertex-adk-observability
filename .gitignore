@@ -1,0 +1,16 @@
+# Local settings and state (tenant, project and resource ids)
+config.json
+deployment.json
+a365.config.json
+a365.generated.config.json
+appsettings*.json
+
+# Run output (OTLP payloads contain prompts and tool results)
+out/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env

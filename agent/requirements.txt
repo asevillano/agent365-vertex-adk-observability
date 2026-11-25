@@ -1,0 +1,7 @@
+# Same pinned versions as the original renewal-risk-analyst-m365 deployment.
+google-cloud-aiplatform[agent_engines,adk]==1.160.0
+google-adk[db,mcp]==2.4.0
+google-genai==2.10.0
+mcp==1.28.1
+cloudpickle==3.1.2
+pydantic==2.13.4

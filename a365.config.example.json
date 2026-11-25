@@ -1,0 +1,12 @@
+{
+  "tenantId": "<tenant-id>",
+  "clientAppId": "<agent-365-cli-client-app-id>",
+  "environment": "AzureCloud",
+  "graphBaseUrl": "https://graph.microsoft.com",
+  "authorityHost": "https://login.microsoftonline.com",
+  "agentIdentityDisplayName": "a365-renewal-risk-sample Identity",
+  "agentBlueprintDisplayName": "a365-renewal-risk-sample Blueprint",
+  "agentDescription": "a365-renewal-risk-sample",
+  "aiTeammate": false,
+  "useBlueprint": true
+}

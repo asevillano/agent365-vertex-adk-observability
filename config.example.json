@@ -1,0 +1,19 @@
+{
+  "tenantId": "<tenant-id>",
+  "agentAppId": "<agent-identity-appId>",
+  "agentBlueprintId": "<agent-blueprint-appId>",
+  "agentName": "Renewal Risk Sample (Vertex AI)",
+  "agentDescription": "ADK agent on Vertex AI Agent Engine that assesses customer renewal risk",
+  "channel": "web",
+  "gcpProject": "<gcp-project-id>",
+  "gcpRegion": "us-central1",
+  "displayName": "a365-renewal-risk-sample",
+  "serviceAccount": "a365-adk-agent@<gcp-project-id>.iam.gserviceaccount.com",
+  "secretName": "a365-blueprint-secret",
+  "observabilityResource": "9b975845-388f-4429-889e-eab1ef63949c",
+  "observabilityBaseUrl": "https://agent365.svc.cloud.microsoft/observabilityService",
+  "agentEnv": {
+    "AGENT_MODEL": "gemini-2.5-flash"
+  },
+  "testUserId": "<entra-user-objectId>"
+}
