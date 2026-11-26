@@ -31,25 +31,33 @@ Versiones probadas: google-adk 2.4.0, google-cloud-aiplatform 1.160.0, Python 3.
 
 ## Arquitectura
 
-```text
- Usuario / aplicación
-        │  async_stream_query(user_id = objectId de Entra, message)
-        ▼
-┌─────────────────────── Vertex AI Agent Engine (GCP) ────────────────────────┐
-│  AdkApp(agent=root_agent, plugins=[A365ObservabilityPlugin])                │
-│     │ callbacks de ADK: run, modelo, herramientas                           │
-│     ▼                                                                       │
-│  Plugin: invoke_agent (raíz) + chat por llamada al modelo                   │
-│          + execute_tool por herramienta, en una misma traza                 │
-│     │ 1. secreto del blueprint ← Secret Manager (solo ese secreto)          │
-│     │ 2. token en dos pasos ← Microsoft Entra ID                            │
-│     │ 3. POST OTLP/JSON                                                     │
-└─────┼───────────────────────────────────────────────────────────────────────┘
-      ▼
- Agent 365 Observability (S2S)  /tenants/{tenant}/otlp/agents/{agent-identity}/traces
-      ├──► Microsoft Defender (CloudAppEvents)
-      ├──► Centro de administración de Microsoft 365 (inventario y actividad)
-      └──► Microsoft Purview
+```mermaid
+flowchart TB
+    user["Usuario / aplicación"]
+
+    subgraph gcp["Vertex AI Agent Engine (GCP)"]
+        app["AdkApp<br/>agent=root_agent<br/>plugins=[A365ObservabilityPlugin]"]
+        plugin["A365ObservabilityPlugin<br/>invoke_agent (raíz)<br/>+ chat por llamada al modelo<br/>+ execute_tool por herramienta<br/>(una misma traza)"]
+        secrets[("Secret Manager<br/>solo el secreto del blueprint")]
+    end
+
+    entra["Microsoft Entra ID<br/>token en dos pasos"]
+    a365["Agent 365 Observability (S2S)<br/>/tenants/{tenant}/otlp/agents/{agent-identity}/traces"]
+
+    subgraph m365["Microsoft 365"]
+        defender["Microsoft Defender<br/>(CloudAppEvents)"]
+        admin["Centro de administración de M365<br/>(inventario y actividad)"]
+        purview["Microsoft Purview"]
+    end
+
+    user -- "async_stream_query(user_id = objectId de Entra, message)" --> app
+    app -- "callbacks de ADK: run, modelo, herramientas" --> plugin
+    plugin -- "1. lee el secreto" --> secrets
+    plugin -- "2. pide el token" --> entra
+    plugin -- "3. POST OTLP/JSON" --> a365
+    a365 --> defender
+    a365 --> admin
+    a365 --> purview
 ```
 
 ### Identidad y token
